@@ -9,17 +9,30 @@ from aruco.kalmanFilter import KalmanFilter
 
 
 class MyAruco():
-    std = False
+
+    def __init__(self, std):
+        self.std = std
+        path = sys.path[0]
+        if std:
+            self.cap = cv2.VideoCapture(0)
+            self.cap.set(3, 1280)
+            self.cap.set(4, 1024)
+        if std != True:
+            self.camera_matrix = np.loadtxt(
+                (path + '\\aruco\cameraMatrix.txt'), delimiter=',')
+            self.camera_distortion = np.loadtxt(
+                path + '\\aruco\cameraDistortion.txt', delimiter=',')
+        else:
+            # virtual camera - gazebo
+            self.camera_matrix = np.array([467.74270306499267, 0.0, 320.5, 0.0,
+                                           467.74270306499267, 240.5, 0.0, 0.0, 1.0]).reshape(3, 3)
+            self.camera_distortion = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
+
+    # std = False
 
     # camera url
     url = 'http://192.168.0.64/capture'
     # url = 'http://192.168.138.131:8080/stream?topic=/webcam/image_raw'
-
-    if std:
-        cap = cv2.VideoCapture(0)
-        cap.set(3,1280)
-        cap.set(4,1024)
-        
 
     # --- Define Tag
     marker_size = 5  # - [cm]
@@ -28,19 +41,9 @@ class MyAruco():
     font = cv2.FONT_HERSHEY_PLAIN
     parameters = aruco.DetectorParameters_create()
 
-    # camera calibration
-    path = sys.path[0]
+    # camera calibration - esp32cam
+
     # print(path)
-    if std != True:
-        camera_matrix = np.loadtxt(
-            (path + '\\aruco\cameraMatrix.txt'), delimiter=',')
-        camera_distortion = np.loadtxt(
-            path + '\\aruco\cameraDistortion.txt', delimiter=',')
-    else:
-        # virtual camera
-        camera_matrix = np.array([467.74270306499267, 0.0, 320.5, 0.0,
-                                  467.74270306499267, 240.5, 0.0, 0.0, 1.0]).reshape(3, 3)
-        camera_distortion = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
 
     # print(camera_matrix)
     # print(camera_distortion)
@@ -60,6 +63,7 @@ class MyAruco():
     cameraYaw = 0
 
     markerFound = False
+    markerFoundDelayed=False
 
     x = 0
     y = 0
@@ -67,12 +71,22 @@ class MyAruco():
     x_centerPixel = 0
     y_centerPixel = 0
 
-    KF = KalmanFilter(0.1, [0, 0])
+    center_frameX = 0
+    center_frameY = 0
+
+    markerNotFoundCounter = 0
+
+    firstLoop = True
+
+    KF = KalmanFilter(0.1, [0, 0, 0])
     kf_state = KF.predict().astype(np.int32)
+
+    target = (center_frameX, center_frameY)
+
+    points = np.empty((0,2), np.int32)
 
     def detectMarker(self, id_to_find):
         tickmark = cv2.getTickCount()
-        self.kf_state = self.KF.predict().astype(np.int32)
 
         if self.std:
             ret, frame = self.cap.read()
@@ -82,7 +96,12 @@ class MyAruco():
             imgNp = np.array(bytearray(imgResp.read()), dtype=np.uint8)
             frame = cv2.imdecode(imgNp, cv2.IMREAD_COLOR)
 
-        height, width = frame.shape[:2]
+        if self.firstLoop:
+            self.height, self.width = frame.shape[:2]
+            self.center_frameX = int(self.width/2)
+            self.center_frameY = int(self.height/2)
+            self.target = (self.center_frameX,  self.center_frameY)
+            self.firstLoop = False
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -121,7 +140,7 @@ class MyAruco():
 
             # -- Print the tag position in camera frame
             str_position = "MARKER Position x=%4.0f  y=%4.0f  z=%4.0f" % (
-                self.markerX, self.markerY, self.markerZ)
+                self.kf_state[0], self.kf_state[1], self.markerZ)
             cv2.putText(frame, str_position, (0, 10), self.font,
                         0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
@@ -168,12 +187,20 @@ class MyAruco():
             cv2.putText(frame, str_attitude, (0, 40), self.font,
                         0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
+            self.kf_state = self.KF.predict().astype(np.int32)
             self.KF.update(np.expand_dims(
-                (self.x_centerPixel, self.y_centerPixel), axis=-1))
+                (self.x_centerPixel, self.y_centerPixel, yaw_marker), axis=-1))
             self.markerFound = True
+            self.markerFoundDelayed = True
+            self.markerNotFoundCounter = 0
 
         else:
             self.markerFound = False
+            if self.markerNotFoundCounter < 10:
+                self.kf_state = self.KF.predict().astype(np.int32)
+                self.markerNotFoundCounter += 1
+            else:
+                self.markerFoundDelayed = False
 
         # --- Display the frame
         # frame = cv2.undistort(frame, camera_matrix, camera_distortion, None, None)
@@ -185,10 +212,10 @@ class MyAruco():
         # self.y=a*(self.markerY-self.y)
 
         # frame= cv2.circle(frame, (int(self.x),int(self.y)), 10, (255,0,0), 1)
-        frame = cv2.line(frame, (0, int(height/2)),
-                         (width, int(height/2)), (255, 255, 255), 1)
-        frame = cv2.line(frame, (int(width/2), 0),
-                         (int(width/2), height), (0, 0, 255), 1)
+        frame = cv2.line(frame, (0, int(self.height/2)),
+                         (self.width, int(self.height/2)), (255, 255, 255), 1)
+        frame = cv2.line(frame, (int(self.width/2), 0),
+                         (int(self.width/2), self.height), (0, 0, 255), 1)
 
         fps = cv2.getTickFrequency()/(cv2.getTickCount()-tickmark)
         cv2.putText(frame, "FPS: {:05.2f}".format(
@@ -205,7 +232,14 @@ class MyAruco():
                         thickness=1,
                         tipLength=0.2)  # draw arrow of movement
 
+        cv2.circle(frame, self.target, 10, (200, 0, 255), -1)
+
         self.KF.dt = cv2.getTickCount()-tickmark
+
+        # self.points= np.append(self.points, np.array([(int(self.kf_state[0]), int(self.kf_state[1]))]), axis=0) 
+        if len(self.points)>0:
+            cv2.drawContours(frame, [self.points], 0, (200, 0, 255), 2)
+        # print(self.points)
 
         cv2.imshow('frame', frame)
         k = cv2.waitKey(1)
